@@ -185,3 +185,114 @@ curl -X POST 'http://localhost:8000/plans/applications?prefix=10.12.0.0%2F16' \
 先裁决者放行并进入 pending，后裁决者必须把先裁决的批次计入不确定集合——若联合穷举
 出现风险则退回（自测 `test_api_receipt_changes_decision_concurrency` 验证：并发结果
 恰为一个 approved、一个 rejected，且只有先裁决的设备出现在 pending 中）。
+
+## 精确十进制容量核算（满载 / 微量超载 / 大数汇聚）
+
+链路容量与入口流量全程以 **JSON 数字** 传递（支持科学计数法），服务端用
+`Decimal` 精确十进制核算，不经过 float、不使用比较容差：
+
+- 合计 **恰好等于** 容量（刚好满载）通过容量检查；
+- 合计严格大于容量才判超载，任一链路超载即整批退回；
+- 录入数字的原始十进制字面量（如 `0.20000000000000001`、`1e309`）在查回方案、
+  重新录入后原样保留；
+- 即使合计超出 float64 的有限范围（> 1.7976931348623157e308），仍按精确十进制
+  裁决并在响应中以合法 JSON 数字给出合计与容量（如 `2E+309`）。
+
+三个演示拓扑相同：`r2 -> r1 -> exit`，两个入口（r1、r2）的流量汇聚到瓶颈链路
+`r1 -> exit`。载荷见 `scripts/plan_decimal_full.json`、`plan_decimal_overload.json`、
+`plan_decimal_huge.json`，可由 `python scripts/demo_decimal.py` 一键复现。
+
+### 1. 刚好满载 —— 0.1 + 0.2 == 容量 0.3，放行
+
+```bash
+curl -X PUT http://localhost:8000/plans -H 'Content-Type: application/json' \
+  -d @scripts/plan_decimal_full.json
+curl -X POST 'http://localhost:8000/plans/applications?prefix=10.30.1.0%2F24' \
+  -H 'Content-Type: application/json' -d '{"devices":["r1"]}'
+```
+
+```json
+{
+  "decision": "approved",
+  "scenarios_evaluated": 2,
+  "failing_scenarios_count": 0,
+  "fault_summary": {"断路": 0, "环路": 0, "超载": 0}
+}
+```
+
+> 旧实现用 float 累加并带 `1e-9` 容差，`0.1 + 0.2` 在二进制浮点下是
+> `0.30000000000000004`，满载判定不可靠；现在按十进制严格比较，相等即放行。
+
+### 2. 微量超载 —— 0.1 + 0.20000000000000001 = 0.30000000000000001 > 0.3，整批退回
+
+```bash
+curl -X PUT http://localhost:8000/plans -H 'Content-Type: application/json' \
+  -d @scripts/plan_decimal_overload.json
+curl -X POST 'http://localhost:8000/plans/applications?prefix=10.30.2.0%2F24' \
+  -H 'Content-Type: application/json' -d '{"devices":["r1"]}'
+```
+
+```json
+{
+  "decision": "rejected",
+  "scenarios_evaluated": 2,
+  "failing_scenarios_count": 2,
+  "fault_summary": {"断路": 0, "环路": 0, "超载": 2},
+  "failing_scenarios": [
+    {
+      "index": 0,
+      "device_states": {"r1": "old"},
+      "reachable": false,
+      "faults": [
+        {
+          "type": "超载",
+          "location": "r1 -> exit",
+          "detail": "链路 r1 -> exit 合计流量 0.30000000000000001 超过容量 0.3",
+          "load": 0.30000000000000001,
+          "capacity": 0.3
+        }
+      ]
+    }
+  ]
+}
+```
+
+`load`、`capacity` 都是 **JSON 数字**（无引号），数值精确到最后一位。
+`GET /plans/detail` 的申请历史中给出的合计与容量与退回响应完全一致。
+
+### 3. 大数汇聚 —— 1e309 + 1e309 = 2e309，超出 float64 有限范围仍精确退回
+
+```bash
+curl -X PUT http://localhost:8000/plans -H 'Content-Type: application/json' \
+  -d @scripts/plan_decimal_huge.json
+curl -X POST 'http://localhost:8000/plans/applications?prefix=10.30.3.0%2F24' \
+  -H 'Content-Type: application/json' -d '{"devices":["r1"]}'
+```
+
+```json
+{
+  "decision": "rejected",
+  "fault_summary": {"断路": 0, "环路": 0, "超载": 2},
+  "failing_scenarios": [
+    {
+      "index": 0,
+      "device_states": {"r1": "old"},
+      "reachable": false,
+      "faults": [
+        {
+          "type": "超载",
+          "location": "r1 -> exit",
+          "detail": "链路 r1 -> exit 合计流量 2E+309 超过容量 1E+309",
+          "load": 2E+309,
+          "capacity": 1e309
+        }
+      ]
+    }
+  ]
+}
+```
+
+`1e309` 已超出 float64 的最大有限值（约 1.8e308），用 float 解析会变成 `Infinity`
+而无法比较；Decimal 把它作为有限十进制数精确处理。注意 `capacity` 保留录入时的
+原文写法 `1e309`，而合计 `2E+309` 是运算后规范化的十进制表示——两者都是合法
+JSON 数字，数值准确。把容量改为 `2e309` 再申请则刚好满载、予以放行。

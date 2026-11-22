@@ -10,24 +10,30 @@
 需要穷举它们的 2^|U| 种新旧组合。任一组合下出现断路、环路或链路超载，
 则整批退回；全部组合安全才放行。这样无论这些设备以什么先后顺序切换，
 流量都能到达出口且每条有向链路的合计流量不超过容量。
+
+容量与流量全程使用 :class:`decimal.Decimal` 精确十进制运算（不经过 float）：
+合计严格按十进制比较，**刚好满载（合计 == 容量）通过容量检查**，
+不存在二进制浮点误差，也不使用任何比较容差。
 """
 
 from __future__ import annotations
 
+from decimal import Decimal, localcontext
 from itertools import product
 from typing import Any
 
+from .decimals import DECIMAL_PRECISION, format_total
 from .models import PlanIn
 
-# 浮点比较容差
-EPS = 1e-9
 # 单批最多 12 台路由器 => 2^12 = 4096 个场景
 MAX_SCENARIOS = 1 << 12
 # 退回时回传的故障场景上限，避免响应体过大
 MAX_REPORTED_SCENARIOS = 100
 
+ZERO = Decimal(0)
 
-def _build_capacity_map(plan: PlanIn) -> dict[tuple[str, str], float]:
+
+def _build_capacity_map(plan: PlanIn) -> dict[tuple[str, str], Decimal]:
     return {(link.src, link.dst): link.capacity for link in plan.links}
 
 
@@ -51,7 +57,21 @@ def evaluate(
     :param confirmed: 已登记成功回执的设备，强制新路由
     :param uncertain: 本批设备 ∪ 已放行未确认设备，新旧均可能
     :return: 含 scenarios / reachable / fault_summary / approved 的结果字典
+
+    录入的流量/容量按完整十进制精度保留原始字面量；合计运算在
+    ``DECIMAL_PRECISION``（128 位有效数字）上下文中进行，避免长有效数字被
+    默认 28 位精度截断，输出前对合计做规范化（如 ``2E+309`` 而非带尾零的展开）。
     """
+    with localcontext() as ctx:
+        ctx.prec = DECIMAL_PRECISION
+        return _evaluate(plan, confirmed, uncertain)
+
+
+def _evaluate(
+    plan: PlanIn,
+    confirmed: set[str],
+    uncertain: set[str],
+) -> dict[str, Any]:
     capacity_map = _build_capacity_map(plan)
     old_route, new_route = _build_route_maps(plan)
     router_set = set(plan.routers)
@@ -87,7 +107,7 @@ def evaluate(
 
         faults: list[dict[str, Any]] = []
         seen_faults: set[tuple[str, str]] = set()
-        load: dict[tuple[str, str], float] = {}
+        load: dict[tuple[str, str], Decimal] = {}
 
         for ingress in plan.ingresses:
             # 沿当前场景的路由表逐跳追踪到出口
@@ -113,7 +133,8 @@ def evaluate(
                     break
                 path_index[hop] = len(path)
                 path.append(hop)
-                load[edge] = load.get(edge, 0.0) + ingress.traffic
+                # 精确十进制累加：不产生二进制浮点误差
+                load[edge] = load.get(edge, ZERO) + ingress.traffic
                 current = hop
 
             if open_location is not None:
@@ -139,10 +160,13 @@ def evaluate(
                         }
                     )
 
-        # 容量核算：每条有向链路上的合计入口流量不得超过容量
-        for (src, dst), total in sorted(load.items()):
+        # 容量核算：每条有向链路上的合计入口流量不得超过容量。
+        # 严格十进制比较，无容差：合计 == 容量（刚好满载）放行，合计 > 容量才超载。
+        for (src, dst), total in sorted(load.items(), key=lambda item: item[0]):
             capacity = capacity_map[(src, dst)]
-            if total > capacity + EPS:
+            if total > capacity:
+                # 规范化合计表示：去尾随零、整数合计输出整数字面量（如 120、2E+309）
+                total_display = format_total(total)
                 location = f"{src} -> {dst}"
                 key = ("超载", location)
                 if key not in seen_faults:
@@ -151,8 +175,8 @@ def evaluate(
                         {
                             "type": "超载",
                             "location": location,
-                            "detail": f"链路 {location} 合计流量 {total:g} 超过容量 {capacity:g}",
-                            "load": round(total, 6),
+                            "detail": f"链路 {location} 合计流量 {total_display.raw} 超过容量 {capacity}",
+                            "load": total_display,
                             "capacity": capacity,
                         }
                     )

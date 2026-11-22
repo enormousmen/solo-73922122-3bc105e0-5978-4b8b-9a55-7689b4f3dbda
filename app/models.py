@@ -1,27 +1,94 @@
-"""Pydantic 数据模型与录入校验。"""
+"""Pydantic 数据模型与录入校验。
+
+流量与容量字段使用 :class:`~app.decimals.ExactDecimal`（Decimal 子类），
+请求体经 ``app.decimals.loads`` 解析后原样保留十进制字面量，全程不经过 float，
+因此支持科学计数法与超过 float64 有限范围的数值，且“查回再录入”保持原值。
+"""
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from .decimals import ExactDecimal, ExactDecimalField
 
 MAX_ROUTERS = 12
 
 
-class LinkIn(BaseModel):
+class _ExactModel(BaseModel):
+    # Decimal 子类属于非内建类型，需要显式允许
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_numbers_to_exact_decimal(cls, data):
+        """进程内直接用 int/float/str/Decimal 构造模型时的归一化入口。
+
+        HTTP 请求路径下数字已由 app.decimals.loads 解析为 ExactDecimal（保留原始
+        字面量），这里直接放行；为方便内部构造与测试，把裸 int/float/str 数字
+        转成 ExactDecimal。float 转换取其最短往返表示（repr），语义上仍是该
+        float 对应的十进制值。
+        """
+        if not isinstance(data, dict):
+            return data
+
+        def coerce(value):
+            if isinstance(value, ExactDecimal):
+                return value
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, int):
+                return ExactDecimal(str(value), str(value))
+            if isinstance(value, float):
+                text = repr(value)
+                return ExactDecimal(text, text)
+            if isinstance(value, Decimal):
+                # 引擎合计等算术结果为普通 Decimal：按规范十进制文本包装
+                return ExactDecimal(value, str(value))
+            if isinstance(value, str):
+                # 仅尝试解析纯数字字符串，其他字符串保持原样交给字段校验
+                try:
+                    return ExactDecimal(value, value)
+                except Exception:
+                    return value
+            if isinstance(value, list):
+                return [coerce(item) for item in value]
+            if isinstance(value, dict):
+                return {key: coerce(item) for key, item in value.items()}
+            return value
+
+        return {key: coerce(value) for key, value in data.items()}
+
+
+class LinkIn(_ExactModel):
     """有向链路及其容量。"""
 
     src: str = Field(..., min_length=1, description="链路起点")
     dst: str = Field(..., min_length=1, description="链路终点")
-    capacity: float = Field(..., gt=0, description="链路容量（>0）")
+    capacity: ExactDecimalField = Field(..., description="链路容量（有限十进制数，>0）")
+
+    @field_validator("capacity")
+    @classmethod
+    def _capacity_positive_finite(cls, value: ExactDecimal) -> ExactDecimal:
+        if not value.is_finite() or value <= 0:
+            raise ValueError("链路容量必须是大于 0 的有限十进制数")
+        return value
 
 
-class IngressIn(BaseModel):
+class IngressIn(_ExactModel):
     """入口流量：从某个节点进入、去往出口的流量。"""
 
     node: str = Field(..., min_length=1, description="入口节点")
-    traffic: float = Field(..., ge=0, description="入口流量（>=0）")
+    traffic: ExactDecimalField = Field(..., description="入口流量（有限十进制数，>=0）")
+
+    @field_validator("traffic")
+    @classmethod
+    def _traffic_non_negative_finite(cls, value: ExactDecimal) -> ExactDecimal:
+        if not value.is_finite() or value < 0:
+            raise ValueError("入口流量必须是大于等于 0 的有限十进制数")
+        return value
 
 
 class RouteIn(BaseModel):
@@ -32,7 +99,7 @@ class RouteIn(BaseModel):
     new_next_hop: str = Field(..., min_length=1, description="新路由下一跳")
 
 
-class PlanIn(BaseModel):
+class PlanIn(_ExactModel):
     """值班员为一个目的网段录入的换路方案（PUT 全量覆盖）。"""
 
     prefix: str = Field(..., min_length=1, description="目的网段，如 10.10.0.0/16")
@@ -108,17 +175,18 @@ class ReceiptIn(BaseModel):
     note: str | None = Field(None, description="备注")
 
 
-class Fault(BaseModel):
+class Fault(_ExactModel):
     """单条故障：类型 + 故障位置 + 细节。"""
 
     type: Literal["断路", "环路", "超载"]
     location: str = Field(..., description="故障位置，如 r1 -> r3 或 r1 -> r2 -> r1")
     detail: str
-    load: float | None = None
-    capacity: float | None = None
+    # 超载故障时给出精确的链路合计流量与容量（JSON 数字）
+    load: ExactDecimalField | None = None
+    capacity: ExactDecimalField | None = None
 
 
-class ScenarioOut(BaseModel):
+class ScenarioOut(_ExactModel):
     """一种不确定设备的新旧状态组合及其核算结果。"""
 
     index: int
@@ -127,7 +195,7 @@ class ScenarioOut(BaseModel):
     faults: list[Fault]
 
 
-class ApplicationOut(BaseModel):
+class ApplicationOut(_ExactModel):
     """一次换路申请的裁决结果。"""
 
     application_id: str
@@ -167,6 +235,7 @@ class PlanSummary(BaseModel):
 
 
 class PlanDetail(PlanSummary):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
     plan: PlanIn
     applications: list[ApplicationOut]
     created_at: str

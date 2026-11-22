@@ -34,3 +34,29 @@ echo
 echo "== 6. 查询网段全量状态（含全部申请历史）=="
 curl -s "$BASE/plans/detail?prefix=$PREFIX"
 echo
+
+echo "== 7. 精确十进制容量核算演示（满载 / 微量超载 / 大数汇聚）=="
+# 拓扑：r2 -> r1 -> exit，两个入口的流量汇聚到瓶颈链路 r1 -> exit
+# 7a. 满载：0.1 + 0.2 恰好等于容量 0.3 -> 放行
+curl -s -X PUT "$BASE/plans" -H 'Content-Type: application/json' \
+  -d @"$(dirname "$0")/plan_decimal_full.json"
+echo
+curl -s -X POST "$BASE/plans/applications?prefix=10.30.1.0%2F24" \
+  -H 'Content-Type: application/json' -d '{"devices":["r1"]}'
+echo
+
+# 7b. 微量超载：0.1 + 0.20000000000000001 = 0.30000000000000001 > 0.3 -> 整批退回
+curl -s -X PUT "$BASE/plans" -H 'Content-Type: application/json' \
+  -d @"$(dirname "$0")/plan_decimal_overload.json"
+echo
+curl -s -X POST "$BASE/plans/applications?prefix=10.30.2.0%2F24" \
+  -H 'Content-Type: application/json' -d '{"devices":["r1"]}'
+echo
+
+# 7c. 大数汇聚：1e309 + 1e309 = 2e309 > 1e309（合计超出 float64 有限范围）-> 退回
+curl -s -X PUT "$BASE/plans" -H 'Content-Type: application/json' \
+  -d @"$(dirname "$0")/plan_decimal_huge.json"
+echo
+curl -s -X POST "$BASE/plans/applications?prefix=10.30.3.0%2F24" \
+  -H 'Content-Type: application/json' -d '{"devices":["r1"]}'
+echo

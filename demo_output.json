@@ -14,13 +14,13 @@
         "confirmed_devices": [],
         "pending_devices": [],
         "application_count": 0,
-        "updated_at": "2026-11-22T17:51:44.762439+00:00"
+        "updated_at": "2026-11-22T22:57:12.520507+00:00"
       }
     },
     {
       "step": "apply_r3",
       "response": {
-        "application_id": "app-71108a660c0e",
+        "application_id": "app-417f696d47e9",
         "prefix": "10.11.0.0/16",
         "decision": "approved",
         "batch": [
@@ -39,13 +39,13 @@
         "failing_scenarios": [],
         "failing_scenarios_truncated": false,
         "message": "全部 2 种新旧组合核算通过，本批 1 台设备放行；登记成功回执前按不确定设备处理",
-        "decided_at": "2026-11-22T17:51:44.767653+00:00"
+        "decided_at": "2026-11-22T22:57:12.525763+00:00"
       }
     },
     {
       "step": "apply_r4_before_receipt",
       "response": {
-        "application_id": "app-d4e9a608a4f6",
+        "application_id": "app-3d1918e3516a",
         "prefix": "10.11.0.0/16",
         "decision": "rejected",
         "batch": [
@@ -83,7 +83,7 @@
         ],
         "failing_scenarios_truncated": false,
         "message": "在 1/4 种新旧组合下存在断路/环路/超载，整批退回，原有放行记录不变",
-        "decided_at": "2026-11-22T17:51:44.769091+00:00"
+        "decided_at": "2026-11-22T22:57:12.527423+00:00"
       }
     },
     {
@@ -102,7 +102,7 @@
           "r3"
         ],
         "application_count": 2,
-        "updated_at": "2026-11-22T17:51:44.769091+00:00",
+        "updated_at": "2026-11-22T22:57:12.527423+00:00",
         "plan": {
           "prefix": "10.11.0.0/16",
           "exit_node": "exit",
@@ -116,48 +116,48 @@
             {
               "src": "r1",
               "dst": "r2",
-              "capacity": 100.0
+              "capacity": 100
             },
             {
               "src": "r1",
               "dst": "r3",
-              "capacity": 100.0
+              "capacity": 100
             },
             {
               "src": "r2",
               "dst": "r4",
-              "capacity": 100.0
+              "capacity": 100
             },
             {
               "src": "r2",
               "dst": "r1",
-              "capacity": 100.0
+              "capacity": 100
             },
             {
               "src": "r3",
               "dst": "r4",
-              "capacity": 100.0
+              "capacity": 100
             },
             {
               "src": "r3",
               "dst": "exit",
-              "capacity": 100.0
+              "capacity": 100
             },
             {
               "src": "r4",
               "dst": "exit",
-              "capacity": 100.0
+              "capacity": 100
             },
             {
               "src": "r4",
               "dst": "r3",
-              "capacity": 100.0
+              "capacity": 100
             }
           ],
           "ingresses": [
             {
               "node": "r1",
-              "traffic": 10.0
+              "traffic": 10
             }
           ],
           "routes": [
@@ -185,7 +185,7 @@
         },
         "applications": [
           {
-            "application_id": "app-71108a660c0e",
+            "application_id": "app-417f696d47e9",
             "prefix": "10.11.0.0/16",
             "decision": "approved",
             "batch": [
@@ -204,10 +204,10 @@
             "failing_scenarios": [],
             "failing_scenarios_truncated": false,
             "message": "全部 2 种新旧组合核算通过，本批 1 台设备放行；登记成功回执前按不确定设备处理",
-            "decided_at": "2026-11-22T17:51:44.767653+00:00"
+            "decided_at": "2026-11-22T22:57:12.525763+00:00"
           },
           {
-            "application_id": "app-d4e9a608a4f6",
+            "application_id": "app-3d1918e3516a",
             "prefix": "10.11.0.0/16",
             "decision": "rejected",
             "batch": [
@@ -245,10 +245,10 @@
             ],
             "failing_scenarios_truncated": false,
             "message": "在 1/4 种新旧组合下存在断路/环路/超载，整批退回，原有放行记录不变",
-            "decided_at": "2026-11-22T17:51:44.769091+00:00"
+            "decided_at": "2026-11-22T22:57:12.527423+00:00"
           }
         ],
-        "created_at": "2026-11-22T17:51:44.762405+00:00"
+        "created_at": "2026-11-22T22:57:12.520474+00:00"
       }
     },
     {
@@ -256,19 +256,19 @@
       "response": {
         "prefix": "10.11.0.0/16",
         "device": "r3",
-        "receipt_id": "rcpt-f21de9d75def",
+        "receipt_id": "rcpt-6a41198a07ab",
         "status": "registered",
         "confirmed_devices": [
           "r3"
         ],
         "pending_devices": [],
-        "recorded_at": "2026-11-22T17:51:44.774560+00:00"
+        "recorded_at": "2026-11-22T22:57:12.533958+00:00"
       }
     },
     {
       "step": "apply_r4_after_receipt",
       "response": {
-        "application_id": "app-19af899762a8",
+        "application_id": "app-a55218d0b4bf",
         "prefix": "10.11.0.0/16",
         "decision": "approved",
         "batch": [
@@ -287,7 +287,7 @@
         "failing_scenarios": [],
         "failing_scenarios_truncated": false,
         "message": "全部 2 种新旧组合核算通过，本批 1 台设备放行；登记成功回执前按不确定设备处理",
-        "decided_at": "2026-11-22T17:51:44.775778+00:00"
+        "decided_at": "2026-11-22T22:57:12.535261+00:00"
       }
     }
   ],
@@ -295,7 +295,7 @@
     {
       "step": "apply_r1",
       "response": {
-        "application_id": "app-eb04b1b1231f",
+        "application_id": "app-f045b8ad8820",
         "prefix": "10.12.0.0/16",
         "decision": "rejected",
         "batch": [
@@ -323,8 +323,8 @@
                 "type": "超载",
                 "location": "r3 -> exit",
                 "detail": "链路 r3 -> exit 合计流量 120 超过容量 100",
-                "load": 120.0,
-                "capacity": 100.0
+                "load": 120,
+                "capacity": 100
               }
             ]
           },
@@ -347,7 +347,7 @@
         ],
         "failing_scenarios_truncated": false,
         "message": "在 2/2 种新旧组合下存在断路/环路/超载，整批退回，原有放行记录不变",
-        "decided_at": "2026-11-22T17:51:44.778144+00:00"
+        "decided_at": "2026-11-22T22:57:12.538042+00:00"
       }
     }
   ]

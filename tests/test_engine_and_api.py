@@ -3,18 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal
 from urllib.parse import quote
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from app.decimals import ExactDecimal, dumps as exact_dumps, loads as exact_loads
 from app.engine import evaluate
 from app.main import app
 from app.models import PlanIn
 from app.storage import store
 
 client = TestClient(app)
+
+JSON_HEADERS = {"Content-Type": "application/json"}
+
+
+def put_plan(plan: PlanIn):
+    # 以原始 JSON 文本发送，确保数字经精确十进制解析通道（与真实 HTTP 客户端一致）
+    return client.put("/plans", content=exact_dumps(plan.model_dump()), headers=JSON_HEADERS)
 
 
 def p(path_prefix: str, suffix: str) -> str:
@@ -167,8 +176,8 @@ def test_engine_detects_overload() -> None:
     fault = result["failing_scenarios"][0]["faults"][0]
     assert fault["type"] == "超载"
     assert fault["location"] == "r4 -> exit"
-    assert fault["load"] == 120
-    assert fault["capacity"] == 100
+    assert fault["load"] == Decimal("120")
+    assert fault["capacity"] == Decimal("100")
 
 
 def test_engine_enumerates_all_combinations() -> None:
@@ -189,7 +198,7 @@ def _reset_store() -> None:
 def test_api_full_flow_approve_then_reject_then_receipt_then_approve() -> None:
     prefix = "10.11.0.0/16"
     plan = make_plan(prefix=prefix)
-    resp = client.put("/plans", json=plan.model_dump())
+    resp = put_plan(plan)
     assert resp.status_code == 200
 
     # 第一批 r3：两种状态（old r4 / new exit）均安全 => 放行，进入 pending
@@ -226,7 +235,7 @@ def test_api_full_flow_approve_then_reject_then_receipt_then_approve() -> None:
 
 def test_api_rejects_duplicate_and_unknown_devices() -> None:
     prefix = "10.12.0.0/16"
-    client.put("/plans", json=make_plan(prefix=prefix).model_dump())
+    put_plan(make_plan(prefix=prefix))
     client.post(p(prefix, "applications"), json={"devices": ["r3"]})
 
     # 重复申请 pending 设备 => 409
@@ -268,7 +277,7 @@ def test_api_receipt_changes_decision_concurrency() -> None:
             {"device": "r3", "old_next_hop": "exit", "new_next_hop": "exit"},
         ],
     )
-    client.put("/plans", json=plan.model_dump())
+    put_plan(plan)
 
     async def two_concurrent_applications() -> list[str]:
         # 两个申请各自单独都安全；同时在途时，后裁决者必须把先裁决的批次算进去
@@ -309,7 +318,7 @@ def test_api_overload_and_open_circuit_locations() -> None:
             {"device": "r3", "old_next_hop": "exit", "new_next_hop": "exit"},
         ],
     )
-    client.put("/plans", json=plan.model_dump())
+    put_plan(plan)
     resp = client.post(p(prefix, "applications"), json={"devices": ["r1"]})
     body = resp.json()
     assert body["decision"] == "rejected"
@@ -322,14 +331,14 @@ def test_api_overload_and_open_circuit_locations() -> None:
 
 def test_api_put_replaces_and_resets_state() -> None:
     prefix = "10.15.0.0/16"
-    client.put("/plans", json=make_plan(prefix=prefix).model_dump())
+    put_plan(make_plan(prefix=prefix))
     client.post(p(prefix, "applications"), json={"devices": ["r3"]})
     client.post(p(prefix, "receipts"), json={"device": "r3"})
     detail = client.get(q(prefix)).json()
     assert detail["confirmed_devices"] == ["r3"]
 
     # 同前缀重新 PUT => 全量覆盖，放行状态与申请历史重置
-    client.put("/plans", json=make_plan(prefix=prefix).model_dump())
+    put_plan(make_plan(prefix=prefix))
     detail = client.get(q(prefix)).json()
     assert detail["confirmed_devices"] == []
     assert detail["pending_devices"] == []
@@ -342,3 +351,175 @@ def test_api_unknown_prefix_returns_404() -> None:
     assert resp.status_code == 404
     resp = client.post(p("9.9.9.0/24", "receipts"), json={"device": "r1"})
     assert resp.status_code == 404
+
+
+# ---------- 精确十进制容量核算回归（缺陷：0.1 + 0.20000000000000001 被误放行）----------
+
+def _bottleneck_plan(prefix: str, capacity: str, t1: str, t2: str) -> bytes:
+    """两入口流量经 r2->r1 汇聚到瓶颈链路 r1->exit 的录入载荷（JSON 文本）。"""
+    return (
+        "{"
+        f'"prefix":"{prefix}","exit_node":"exit","routers":["r1","r2"],'
+        '"links":['
+        '{"src":"r2","dst":"r1","capacity":1e400},'
+        f'{{"src":"r1","dst":"exit","capacity":{capacity}}}'
+        "],"
+        f'"ingresses":[{{"node":"r1","traffic":{t1}}},{{"node":"r2","traffic":{t2}}}],'
+        '"routes":['
+        '{"device":"r1","old_next_hop":"exit","new_next_hop":"exit"},'
+        '{"device":"r2","old_next_hop":"r1","new_next_hop":"r1"}'
+        "]}"
+    ).encode()
+
+
+def _apply(prefix: str, devices: list[str]):
+    url = p(prefix, "applications")
+    return client.post(url, content=exact_dumps({"devices": devices}).encode(), headers=JSON_HEADERS)
+
+
+def test_exact_decimal_tiny_overload_is_rejected() -> None:
+    """0.1 + 0.20000000000000001 = 0.30000000000000001 > 0.3：必须退回（原缺陷场景）。"""
+    prefix = "10.30.1.0/24"
+    resp = client.put(
+        "/plans",
+        content=_bottleneck_plan(prefix, "0.3", "0.1", "0.20000000000000001"),
+        headers=JSON_HEADERS,
+    )
+    assert resp.status_code == 200
+    resp = _apply(prefix, ["r1"])
+    body = exact_loads(resp.text)
+    assert body["decision"] == "rejected"
+    fault = body["failing_scenarios"][0]["faults"][0]
+    assert fault["location"] == "r1 -> exit"
+    assert fault["load"] == Decimal("0.30000000000000001")
+    assert fault["capacity"] == Decimal("0.3")
+    # 响应文本本身就是精确 JSON 数字，而非 float 渲染结果
+    assert '"load":0.30000000000000001' in resp.text
+    assert '"capacity":0.3' in resp.text
+
+
+def test_exact_decimal_exact_full_load_passes() -> None:
+    """刚好满载（合计 == 容量）通过容量检查：0.1 + 0.2 == 0.3。"""
+    prefix = "10.30.2.0/24"
+    client.put("/plans", content=_bottleneck_plan(prefix, "0.3", "0.1", "0.2"), headers=JSON_HEADERS)
+    resp = _apply(prefix, ["r1"])
+    assert resp.json()["decision"] == "approved"
+
+    # 严格相等的另一种写法：容量等于 0.30000000000000001 同样放行
+    prefix2 = "10.30.3.0/24"
+    client.put(
+        "/plans",
+        content=_bottleneck_plan(prefix2, "0.30000000000000001", "0.1", "0.20000000000000001"),
+        headers=JSON_HEADERS,
+    )
+    resp2 = _apply(prefix2, ["r1"])
+    assert resp2.json()["decision"] == "approved"
+
+
+def test_exact_decimal_large_numbers_beyond_float64() -> None:
+    """合计超出 float64 有限范围：1e309 + 1e309 = 2e309，仍按精确十进制裁决。"""
+    # 超载：容量 1e309
+    prefix = "10.30.4.0/24"
+    client.put("/plans", content=_bottleneck_plan(prefix, "1e309", "1e309", "1e309"), headers=JSON_HEADERS)
+    resp = _apply(prefix, ["r1"])
+    body = exact_loads(resp.text)
+    assert body["decision"] == "rejected"
+    fault = body["failing_scenarios"][0]["faults"][0]
+    assert fault["load"] == Decimal("2E+309")
+    assert fault["capacity"] == Decimal("1E+309")
+    # 响应中是合法 JSON 数字文本（stdlib json 会把它读成 inf，但文本精确）
+    assert '"load":2E+309' in resp.text
+    # 容量是录入值，保留原始字面量写法（小写 e 的 1e309）
+    assert '"capacity":1e309' in resp.text
+
+    # 大数刚好满载：容量 2e309 => 放行
+    prefix2 = "10.30.5.0/24"
+    client.put("/plans", content=_bottleneck_plan(prefix2, "2e309", "1e309", "1e309"), headers=JSON_HEADERS)
+    resp2 = _apply(prefix2, ["r1"])
+    assert resp2.json()["decision"] == "approved"
+
+
+def test_scientific_notation_and_raw_literal_round_trip() -> None:
+    """科学计数法与原始十进制字面量在查回/再录入后保持不变。"""
+    prefix = "10.30.6.0/24"
+    client.put(
+        "/plans",
+        content=_bottleneck_plan(prefix, "0.3000000000000000000", "1.5e-1", "0.20000000000000001"),
+        headers=JSON_HEADERS,
+    )
+    detail_text = client.get(q(prefix)).text
+    # 原始写法必须原样保留在详情响应中
+    for token in ("0.3000000000000000000", "1.5e-1", "0.20000000000000001", "1e400"):
+        assert token in detail_text
+
+    # 查回方案 -> 改前缀 -> 重新录入，原始十进制值继续保留
+    roundtrip = exact_loads(detail_text)["plan"]
+    roundtrip["prefix"] = "10.30.7.0/24"
+    resp = client.put("/plans", content=exact_dumps(roundtrip).encode(), headers=JSON_HEADERS)
+    assert resp.status_code == 200
+    detail2 = client.get(q("10.30.7.0/24")).text
+    for token in ("0.3000000000000000000", "1.5e-1", "0.20000000000000001"):
+        assert token in detail2
+
+    # 存储层确认类型始终是 ExactDecimal 且带 raw
+    state = store._prefixes["10.30.7.0/24"]
+    assert isinstance(state.plan.ingresses[0].traffic, ExactDecimal)
+    assert state.plan.ingresses[0].traffic.raw == "1.5e-1"
+    assert state.plan.links[1].capacity.raw == "0.3000000000000000000"
+
+
+def test_rejection_preserves_pending_and_history_numbers() -> None:
+    """超载整批退回：先前放行状态保留，历史详情与退回响应的数字相同且准确。"""
+    prefix = "10.30.8.0/24"
+    payload = (
+        "{"
+        f'"prefix":"{prefix}","exit_node":"exit","routers":["r1","r2","r3"],'
+        '"links":['
+        '{"src":"r1","dst":"exit","capacity":0.3},'
+        '{"src":"r2","dst":"r1","capacity":1e400},'
+        '{"src":"r2","dst":"r3","capacity":1e400},'
+        '{"src":"r3","dst":"exit","capacity":1e400}'
+        "],"
+        '"ingresses":[{"node":"r1","traffic":0.1},{"node":"r2","traffic":0.20000000000000001}],'
+        '"routes":['
+        '{"device":"r1","old_next_hop":"exit","new_next_hop":"exit"},'
+        '{"device":"r2","old_next_hop":"r3","new_next_hop":"r1"},'
+        '{"device":"r3","old_next_hop":"exit","new_next_hop":"exit"}'
+        "]}"
+    ).encode()
+    client.put("/plans", content=payload, headers=JSON_HEADERS)
+
+    # 第一批 r1 放行（r2 保持旧路由，不碰瓶颈）
+    first = _apply(prefix, ["r1"])
+    assert first.json()["decision"] == "approved"
+
+    # 第二批 r2：new 状态把 0.20000000000000001 汇入瓶颈 => 超载退回
+    second = _apply(prefix, ["r2"])
+    rejected = exact_loads(second.text)
+    assert rejected["decision"] == "rejected"
+    resp_fault = rejected["failing_scenarios"][0]["faults"][0]
+    assert str(resp_fault["load"]) == "0.30000000000000001"
+    assert str(resp_fault["capacity"]) == "0.3"
+
+    # 原放行记录保留
+    detail = exact_loads(client.get(q(prefix)).text)
+    assert detail["pending_devices"] == ["r1"]
+    assert detail["application_count"] == 2
+    hist_fault = detail["applications"][1]["failing_scenarios"][0]["faults"][0]
+    # 退回响应与历史详情给出相同且准确的链路合计/容量
+    assert hist_fault["load"] == resp_fault["load"] == Decimal("0.30000000000000001")
+    assert hist_fault["capacity"] == resp_fault["capacity"] == Decimal("0.3")
+
+
+def test_non_finite_numbers_rejected() -> None:
+    """Infinity/NaN 不是合法 JSON 数字且非有限十进制数，录入必须被拒绝。"""
+    # 标准 JSON 本身不接受 Infinity/NaN（严格解析），服务端 loads 直接抛 JSONDecodeError -> 422
+    resp = client.put(
+        "/plans",
+        content=_bottleneck_plan("10.30.9.0/24", "Infinity", "0.1", "0.2").replace(b"Infinity", b"1e9999"),
+        headers=JSON_HEADERS,
+    )
+    # 1e9999 是有限十进制数（Decimal 可表示），应当录入成功，证明大指数不依赖 float
+    assert resp.status_code == 200
+    state = store._prefixes["10.30.9.0/24"]
+    assert state.plan.links[1].capacity == Decimal("1E+9999")

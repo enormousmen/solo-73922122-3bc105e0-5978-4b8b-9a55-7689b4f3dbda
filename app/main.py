@@ -1,11 +1,22 @@
-"""FastAPI 路由：换路方案录入、放行裁决、回执登记与状态查询。"""
+"""FastAPI 路由：换路方案录入、放行裁决、回执登记与状态查询。
+
+请求体经 :class:`~app.decimals.ExactJSONRoute` 用 ``json.loads(parse_float=...)``
+解析，链路容量/入口流量保留原始十进制字面量；响应经
+:class:`~app.decimals.ExactJSONResponse` 序列化，Decimal 以 JSON 数字原样输出，
+超出 float64 有限范围的合计也按精确十进制数字返回（而非 null/Infinity）。
+"""
 
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import Response
+from fastapi.routing import APIRoute
 
+from .decimals import dumps, loads, restore_decimal_markers
 from .engine import MAX_REPORTED_SCENARIOS, evaluate
 from .models import (
     ApplicationIn,
@@ -19,15 +30,67 @@ from .models import (
 )
 from .storage import store, utc_now_iso
 
+
+class ExactJSONRequest(Request):
+    """用精确十进制解析 JSON 请求体：数字不经过 float，保留原始字面量。
+
+    Starlette 的 ``json()`` 把结果缓存在 ``_json`` 属性上，而 FastAPI 解析
+    请求体时会先 ``await request.body()`` 再 ``await request.json()``，因此这里
+    必须覆盖 ``_json``（而非自定义属性），才能让 FastAPI 的模型解析拿到精确值。
+    """
+
+    async def json(self) -> Any:
+        if not hasattr(self, "_json"):
+            body = await self.body()
+            self._json = loads(body) if body else None
+        return self._json
+
+
+class ExactJSONRoute(APIRoute):
+    def get_route_handler(self):  # type: ignore[override]
+        original = super().get_route_handler()
+
+        async def custom_route_handler(request: Request) -> Response:
+            request = ExactJSONRequest(request.scope, request.receive)
+            return await original(request)
+
+        return custom_route_handler
+
+
+class ExactJSONResponse(Response):
+    """把 Decimal（含 ExactDecimal）序列化为 JSON 数字的响应。
+
+    FastAPI 的 json 模式序列化会把 Decimal 转成字符串，因此模型字段通过
+    ``ExactDecimalField`` 把数值包成标记 dict；这里先递归还原为 ExactDecimal，
+    再由 :func:`app.decimals.dumps` 编码为 JSON 数字。
+    """
+
+    media_type = "application/json"
+
+    def render(self, content: Any) -> bytes:
+        restored = restore_decimal_markers(content)
+        return dumps(restored).encode("utf-8")
+
+
 app = FastAPI(
     title="机房换路放行服务",
-    version="1.0.0",
+    version="1.1.0",
+    default_response_class=ExactJSONResponse,
     description=(
         "值班员录入目的网段的出口、路由器新旧下一跳、入口流量与有向链路容量，"
         "按批申请下发新配置。服务端穷举本批设备与已放行未确认设备的所有新旧"
         "组合，保证任意切换次序下流量均可到达出口且链路不超载；有风险则整批退回。"
+        "流量与容量按精确十进制核算，支持科学计数法与超出 float64 范围的数值。"
     ),
 )
+# 必须在注册任何路由前设置：之后 @app.post 等装饰器才会使用精确 JSON 路由类
+app.router.route_class = ExactJSONRoute
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> ExactJSONResponse:
+    # 错误响应同样走精确 JSON 通道
+    return ExactJSONResponse(status_code=422, content={"detail": exc.errors()})
 
 
 def _summary(state) -> PlanSummary:

@@ -1,0 +1,17 @@
+{
+  "prefix": "10.30.1.0/24",
+  "exit_node": "exit",
+  "routers": ["r1", "r2"],
+  "links": [
+    {"src": "r2", "dst": "r1", "capacity": 1e400},
+    {"src": "r1", "dst": "exit", "capacity": 0.3}
+  ],
+  "ingresses": [
+    {"node": "r1", "traffic": 0.1},
+    {"node": "r2", "traffic": 0.2}
+  ],
+  "routes": [
+    {"device": "r1", "old_next_hop": "exit", "new_next_hop": "exit"},
+    {"device": "r2", "old_next_hop": "r1", "new_next_hop": "r1"}
+  ]
+}

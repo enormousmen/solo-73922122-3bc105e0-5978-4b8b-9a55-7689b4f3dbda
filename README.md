@@ -23,6 +23,18 @@
 - 再次进入路径上已出现的节点 → **环路**，位置为从入口开始的完整转发路径（如 `r1 -> r2 -> r4 -> r3 -> r4`）；
 - 链路上汇聚的入口流量合计超过容量 → **超载**，位置为该链路并附 `load/capacity`。
 
+### 精确十进制容量核算
+
+流量与容量以 JSON 数字传递（支持科学计数法），服务端全程使用 `Decimal` 精确
+十进制运算，**不经过 float、不设比较容差**：合计恰好等于容量（刚好满载）放行，
+严格大于容量才判超载。这避免了 `0.1 + 0.2 = 0.30000000000000004` 这类二进制
+浮点误差导致的误判（例如 0.1 与 0.20000000000000001 汇聚到容量 0.3 的链路）。
+
+- 请求数字保留原始十进制字面量（`raw`），查回方案再录入仍是原来的值；
+- 合计超出 float64 有限范围（> ~1.8e308，float 下为 Infinity）时，Decimal 仍按
+  有限十进制数精确裁决，响应以合法 JSON 数字给出合计（如 `2E+309`）与容量；
+- 退回响应与 `/plans/detail` 历史详情中的链路合计、容量是相同且准确的 JSON 数字。
+
 全部场景安全才放行；放行后本批设备进入 `pending`。登记成功回执后设备转入 `confirmed`，
 之后的裁决按新路由计算。退回不改变任何放行状态，申请记录仍留痕可审计。
 
@@ -33,16 +45,21 @@
 
 ```
 app/
+  decimals.py  # 精确十进制：JSON 数字解析/序列化、原始字面量保留、超 float64 支持
   models.py    # Pydantic 模型与录入校验（12 台上限、节点/链路/路由一致性）
-  engine.py    # 核算引擎：2^n 场景穷举 + 断路/环路/超载检测
+  engine.py    # 核算引擎：2^n 场景穷举 + 断路/环路/超载检测（Decimal 精确比较）
   storage.py   # 进程内存储、设备分组、asyncio 锁
-  main.py      # FastAPI 路由
-tests/         # pytest：引擎单测 + API 全流程 + 并发裁决
+  main.py      # FastAPI 路由（精确 JSON 请求/响应通道）
+tests/         # pytest：引擎单测 + API 全流程 + 并发裁决 + 十进制回归
 scripts/
-  demo.py            # 端到端演示（in-process ASGI，标准库 + httpx）
-  curl_example.sh    # 等价的 curl 调用示例
-  plan_a.json        # 环路场景录入载荷
-  plan_b.json        # 断路+超载场景录入载荷
+  demo.py                  # 端到端演示（in-process ASGI，标准库 + httpx）
+  demo_decimal.py          # 精确十进制演示：满载/微量超载/大数汇聚
+  verify_exact_decimal.py  # 十进制核算 14 项端到端核对
+  curl_example.sh          # 等价的 curl 调用示例
+  plan_a.json / plan_b.json          # 环路 / 断路+超载场景录入载荷
+  plan_decimal_full.json             # 刚好满载（0.1+0.2==0.3）
+  plan_decimal_overload.json         # 微量超载（0.1+0.20000000000000001>0.3）
+  plan_decimal_huge.json             # 大数汇聚（1e309，超 float64 范围）
 Dockerfile
 docker-compose.yml
 requirements.txt
@@ -89,6 +106,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
 pip install -r requirements.txt
 pytest -q
 python scripts/demo.py
+python scripts/demo_decimal.py            # 满载 / 微量超载 / 大数汇聚三个场景
+python scripts/verify_exact_decimal.py    # 14 项端到端核对（含字面量保留、历史一致性）
 bash scripts/curl_example.sh   # 需要先启动服务
 ```
 
